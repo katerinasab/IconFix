@@ -17,6 +17,11 @@ interface Anchor {
   component: string;
   state: string;
   variantTokens: string[];
+  /** Tokens that mark the *opposite* branch of a boolean-ish variant
+   * property (e.g. "checked" when Checked=False) — a candidate containing
+   * one of these is scoped to a state this icon isn't in, not just an
+   * unrelated word, so it must be excluded rather than merely under-scored. */
+  negativeTokens: string[];
 }
 
 function slugify(name: string): string {
@@ -74,6 +79,7 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
 
   let state = DEFAULT_STATE;
   const variantTokens: string[] = [];
+  const negativeTokens: string[] = [];
   for (const [rawKey, prop] of Object.entries(instance.componentProperties ?? {})) {
     if (prop.type !== 'VARIANT') continue;
     const key = cleanPropertyKey(rawKey).toLowerCase();
@@ -86,12 +92,28 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
     variantTokens.push(token);
     // DS naming often prefers semantic words ("default"/"checked") over the
     // literal boolean-ish value of a variant property — add both so scoring
-    // can match either vocabulary.
-    if (token === 'true') variantTokens.push(...BOOLEAN_TRUE_SYNONYMS);
-    if (token === 'false') variantTokens.push(...BOOLEAN_FALSE_SYNONYMS);
+    // can match either vocabulary. The opposite branch's synonyms are a hard
+    // exclusion: e.g. when Checked=False, a candidate scoped to "checked" is
+    // for the other state entirely, not just an unrelated word.
+    if (token === 'true') {
+      variantTokens.push(...BOOLEAN_TRUE_SYNONYMS);
+      negativeTokens.push(...BOOLEAN_FALSE_SYNONYMS);
+    }
+    if (token === 'false') {
+      variantTokens.push(...BOOLEAN_FALSE_SYNONYMS);
+      negativeTokens.push(...BOOLEAN_TRUE_SYNONYMS);
+    }
   }
 
-  return { instance, component, state, variantTokens };
+  return { instance, component, state, variantTokens, negativeTokens };
+}
+
+function hasExcludedSegment(name: string, negativeTokens: string[]): boolean {
+  const axisSegments = name
+    .split('/')
+    .slice(1, -2)
+    .map((s) => s.toLowerCase());
+  return negativeTokens.some((token) => axisSegments.includes(token));
 }
 
 function matchesShape(name: string, component: string, state: string): boolean {
@@ -133,6 +155,7 @@ async function collectLocalCandidates(anchor: Anchor): Promise<TokenCandidate[]>
       if (!variable) continue;
       if (variable.resolvedType !== 'COLOR') continue;
       if (!matchesShape(variable.name, anchor.component, anchor.state)) continue;
+      if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         variable,
         source: collection.name,
@@ -164,6 +187,7 @@ async function collectLibraryCandidates(anchor: Anchor): Promise<TokenCandidate[
     for (const variable of variables) {
       if (variable.resolvedType !== 'COLOR') continue;
       if (!matchesShape(variable.name, anchor.component, anchor.state)) continue;
+      if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         // library candidates are imported lazily only if chosen; store a
         // placeholder Variable-shaped record via a cast at bind time.
@@ -207,7 +231,26 @@ export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | n
   }
 
   const maxScore = Math.max(...candidates.map((c) => c.score));
-  const topCandidates = candidates.filter((c) => c.score === maxScore);
+
+  // A zero score means nothing about the candidate's variant-axis segments
+  // actually matched the anchor — it only shares the component/layer/state
+  // shape. Being the sole such match is not evidence of correctness (e.g. a
+  // stale/orphaned token elsewhere can silently vanish from the real search,
+  // leaving one unrelated same-shaped token looking "unique"); don't guess.
+  if (maxScore === 0) {
+    return { kind: 'AMBIGUOUS_MULTI', candidates, component: anchor.component, state: anchor.state };
+  }
+
+  let topCandidates = candidates.filter((c) => c.score === maxScore);
+
+  // Prefer local over library among equally-scored candidates: editing this
+  // file makes its own local tokens authoritative, and a same-scoring
+  // library candidate is often a differently-shaped legacy/mirrored name
+  // rather than a genuinely distinct real option.
+  const localTop = topCandidates.filter((c) => !c.isLibrary);
+  if (localTop.length > 0) {
+    topCandidates = localTop;
+  }
 
   if (topCandidates.length === 1) {
     return {
