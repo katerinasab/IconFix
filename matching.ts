@@ -2,7 +2,14 @@
 // derives the expected token name shape from it, and searches local +
 // team-library variables for the best-matching replacement token.
 
-import { WRAPPER_NAMES, STATE_PROPERTY_NAMES, DEFAULT_STATE } from './config';
+import {
+  WRAPPER_NAMES,
+  STATE_PROPERTY_NAMES,
+  DEFAULT_STATE,
+  ICON_LAYER_NAMES,
+  BOOLEAN_FALSE_SYNONYMS,
+  BOOLEAN_TRUE_SYNONYMS,
+} from './config';
 import type { BrokenPaint, Resolution, TokenCandidate } from './types';
 
 interface Anchor {
@@ -20,6 +27,12 @@ function cleanPropertyKey(key: string): string {
   return key.split('#')[0];
 }
 
+function hasStateProperty(instance: InstanceNode): boolean {
+  return Object.keys(instance.componentProperties ?? {}).some((key) =>
+    STATE_PROPERTY_NAMES.includes(cleanPropertyKey(key).toLowerCase()),
+  );
+}
+
 async function findAnchorInstance(node: SceneNode): Promise<InstanceNode | null> {
   let current: BaseNode | null = node.parent;
   const candidates: InstanceNode[] = [];
@@ -29,6 +42,16 @@ async function findAnchorInstance(node: SceneNode): Promise<InstanceNode | null>
     }
     current = current.parent;
   }
+
+  // Primary signal: the real DS component is the nearest ancestor that
+  // exposes a recognized "state" variant property — icon glyphs (Set/Style/
+  // Color/Size) and thin wrappers like icon-wrapper (Show Icon) never do.
+  for (const instance of candidates) {
+    if (hasStateProperty(instance)) return instance;
+  }
+
+  // Fallback for components with no state axis: nearest instance whose
+  // component/set name isn't a known thin wrapper.
   for (const instance of candidates) {
     const main = await instance.getMainComponentAsync();
     const name = (main?.parent?.type === 'COMPONENT_SET' ? main.parent.name : main?.name) ?? '';
@@ -57,9 +80,15 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
     const value = String(prop.value);
     if (STATE_PROPERTY_NAMES.includes(key)) {
       state = slugify(value);
-    } else {
-      variantTokens.push(slugify(value));
+      continue;
     }
+    const token = slugify(value);
+    variantTokens.push(token);
+    // DS naming often prefers semantic words ("default"/"checked") over the
+    // literal boolean-ish value of a variant property — add both so scoring
+    // can match either vocabulary.
+    if (token === 'true') variantTokens.push(...BOOLEAN_TRUE_SYNONYMS);
+    if (token === 'false') variantTokens.push(...BOOLEAN_FALSE_SYNONYMS);
   }
 
   return { instance, component, state, variantTokens };
@@ -67,21 +96,28 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
 
 function matchesShape(name: string, component: string, state: string): boolean {
   const segments = name.split('/');
-  if (segments.length < 2) return false;
+  // component / ... / <layer> / <state> — at least 3 segments, and the
+  // layer right before state must be a known icon/text color layer, so an
+  // icon fill never matches a sibling bg/border token of the same component.
+  if (segments.length < 3) return false;
+  const layer = segments[segments.length - 2].toLowerCase();
   return (
     segments[0].toLowerCase() === component.toLowerCase() &&
-    segments[segments.length - 1].toLowerCase() === state.toLowerCase()
+    segments[segments.length - 1].toLowerCase() === state.toLowerCase() &&
+    ICON_LAYER_NAMES.includes(layer)
   );
 }
 
 function scoreCandidate(name: string, variantTokens: string[]): number {
-  const middle = name
+  // Score only the variant-axis segments: exclude the component (index 0)
+  // and the trailing layer/state pair, which matchesShape already pinned.
+  const axisSegments = name
     .split('/')
-    .slice(1, -1)
+    .slice(1, -2)
     .map((s) => s.toLowerCase());
   let score = 0;
   for (const token of variantTokens) {
-    if (middle.includes(token)) score++;
+    if (axisSegments.includes(token)) score++;
   }
   return score;
 }
@@ -142,14 +178,29 @@ async function collectLibraryCandidates(anchor: Anchor): Promise<TokenCandidate[
   return out;
 }
 
+/** Collapses same-named local/library duplicates into one, preferring the
+ * local variable. On a file that is itself a library's source, every local
+ * token also comes back from figma.teamLibrary as a "remote" entry with the
+ * identical name — that's the same token, not a genuine second candidate. */
+function dedupeByName(candidates: TokenCandidate[]): TokenCandidate[] {
+  const byName = new Map<string, TokenCandidate>();
+  for (const candidate of candidates) {
+    const existing = byName.get(candidate.variable.name);
+    if (!existing || (existing.isLibrary && !candidate.isLibrary)) {
+      byName.set(candidate.variable.name, candidate);
+    }
+  }
+  return Array.from(byName.values());
+}
+
 export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | null> {
   const anchor = await describeAnchor(broken.node);
   if (!anchor) return null;
 
-  const candidates = [
+  const candidates = dedupeByName([
     ...(await collectLocalCandidates(anchor)),
     ...(await collectLibraryCandidates(anchor)),
-  ];
+  ]);
 
   if (candidates.length === 0) {
     return { kind: 'AMBIGUOUS_NONE', candidates, component: anchor.component, state: anchor.state };

@@ -20,3 +20,14 @@ export const DEFAULT_STATE = 'rest';
 
 /** Preferred local collection to search first. */
 export const PRIMARY_COLLECTION_NAME = 'Theme';
+
+/** Token name segment (second-to-last, right before state) that marks a
+ * color token as belonging to an icon/text layer — required so icon fills
+ * never get matched against sibling bg/border tokens of the same component. */
+export const ICON_LAYER_NAMES = ['content', 'icon', 'start-icon', 'end-icon'];
+
+/** Extra synonym tokens added for variant properties whose value is a plain
+ * boolean-ish "true"/"false" string, since DS naming often uses semantic
+ * words like "default"/"checked" instead of the literal boolean value. */
+export const BOOLEAN_FALSE_SYNONYMS = ['default'];
+export const BOOLEAN_TRUE_SYNONYMS = ['checked', 'active', 'selected'];
