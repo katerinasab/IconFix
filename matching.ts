@@ -67,19 +67,30 @@ async function findAnchorInstance(node: SceneNode): Promise<InstanceNode | null>
   return candidates.length > 0 ? candidates[candidates.length - 1] : null;
 }
 
+function booleanSynonyms(token: string): string[] {
+  if (token === 'true') return BOOLEAN_TRUE_SYNONYMS;
+  if (token === 'false') return BOOLEAN_FALSE_SYNONYMS;
+  return [];
+}
+
 async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
   const instance = await findAnchorInstance(node);
   if (!instance) return null;
 
   const main = await instance.getMainComponentAsync();
-  const componentSetName =
-    main?.parent?.type === 'COMPONENT_SET' ? main.parent.name : main?.name;
+  const componentSet = main?.parent?.type === 'COMPONENT_SET' ? main.parent : null;
+  const componentSetName = componentSet?.name ?? main?.name;
   if (!componentSetName) return null;
   const component = slugify(componentSetName.split('/')[0]);
 
+  // All other options for each variant property, so e.g. an Accent-styled
+  // icon can exclude a Subtle-styled token — fetched once per anchor since
+  // it requires the component set (variantOptions isn't on the instance).
+  const propertyDefs = componentSet?.componentPropertyDefinitions ?? {};
+
   let state = DEFAULT_STATE;
   const variantTokens: string[] = [];
-  const negativeTokens: string[] = [];
+  const rawNegativeTokens: string[] = [];
   for (const [rawKey, prop] of Object.entries(instance.componentProperties ?? {})) {
     if (prop.type !== 'VARIANT') continue;
     const key = cleanPropertyKey(rawKey).toLowerCase();
@@ -89,21 +100,29 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
       continue;
     }
     const token = slugify(value);
-    variantTokens.push(token);
     // DS naming often prefers semantic words ("default"/"checked") over the
     // literal boolean-ish value of a variant property — add both so scoring
-    // can match either vocabulary. The opposite branch's synonyms are a hard
-    // exclusion: e.g. when Checked=False, a candidate scoped to "checked" is
-    // for the other state entirely, not just an unrelated word.
-    if (token === 'true') {
-      variantTokens.push(...BOOLEAN_TRUE_SYNONYMS);
-      negativeTokens.push(...BOOLEAN_FALSE_SYNONYMS);
-    }
-    if (token === 'false') {
-      variantTokens.push(...BOOLEAN_FALSE_SYNONYMS);
-      negativeTokens.push(...BOOLEAN_TRUE_SYNONYMS);
+    // can match either vocabulary.
+    variantTokens.push(token, ...booleanSynonyms(token));
+
+    // Every other value this property could have taken is scoped to a
+    // variant this icon isn't in — e.g. Style=Accent excludes any candidate
+    // segment naming the Subtle branch, not just an unrelated word.
+    const def = propertyDefs[rawKey];
+    const otherValues = def?.type === 'VARIANT' ? (def.variantOptions ?? []) : [];
+    for (const other of otherValues) {
+      if (other === value) continue;
+      const otherToken = slugify(other);
+      rawNegativeTokens.push(otherToken, ...booleanSynonyms(otherToken));
     }
   }
+
+  // A word that's both a confirmed positive (the anchor's own real value,
+  // possibly via a different property's boolean synonym) and a "some other
+  // option" negative is ambiguous vocabulary overloaded across properties
+  // (e.g. "default" can mean both Checked=False and Type's other value) —
+  // the direct positive evidence from the anchor's actual state wins.
+  const negativeTokens = rawNegativeTokens.filter((t) => !variantTokens.includes(t));
 
   return { instance, component, state, variantTokens, negativeTokens };
 }
