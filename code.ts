@@ -56,6 +56,7 @@ async function run(): Promise<void> {
       field: item.field,
       boundTo: resolution.target.variable.name,
       viaStateFallback: resolution.viaStateFallback,
+      viaMasterLookup: resolution.viaMasterLookup,
     };
     if (applied) {
       result.fixed.push(report);

@@ -2,23 +2,10 @@
 // classifies every fills/strokes paint as OK, a total loss of binding, or a
 // stray placeholder paint sitting alongside a still-good one.
 
-import { PLACEHOLDER_VARIABLE_NAMES, PLACEHOLDER_COLLECTION_NAMES } from './config';
+import { isPlaceholder } from './placeholder';
 import type { BrokenPaint, PaintField } from './types';
 
 const PAINT_FIELDS: PaintField[] = ['fills', 'strokes'];
-
-async function isPlaceholder(variableId: string): Promise<boolean> {
-  const variable = await figma.variables.getVariableByIdAsync(variableId);
-  if (!variable) return false;
-  if (PLACEHOLDER_VARIABLE_NAMES.includes(variable.name.toLowerCase())) return true;
-  if (variable.remote) {
-    const collection = await figma.variables.getVariableCollectionByIdAsync(
-      variable.variableCollectionId,
-    );
-    if (collection && PLACEHOLDER_COLLECTION_NAMES.includes(collection.name)) return true;
-  }
-  return false;
-}
 
 function hasPaintField(node: SceneNode, field: PaintField): node is SceneNode & {
   fills: Paint[];

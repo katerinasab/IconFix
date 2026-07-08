@@ -35,6 +35,9 @@ export interface Resolution {
   /** True when no token existed for the icon's actual state and this binds
    * the "rest" token instead — a deliberate, low-risk fallback, not a bug. */
   viaStateFallback?: boolean;
+  /** True when the target was copied directly from the anchor's own master
+   * component rather than guessed from naming — the higher-confidence path. */
+  viaMasterLookup?: boolean;
 }
 
 export interface AmbiguousReport {
@@ -53,6 +56,7 @@ export interface FixedReport {
   field: PaintField;
   boundTo: string;
   viaStateFallback?: boolean;
+  viaMasterLookup?: boolean;
 }
 
 export interface RunResult {

@@ -10,10 +10,15 @@ import {
   BOOLEAN_FALSE_SYNONYMS,
   BOOLEAN_TRUE_SYNONYMS,
 } from './config';
-import type { BrokenPaint, Resolution, TokenCandidate } from './types';
+import { isPlaceholder } from './placeholder';
+import type { BrokenPaint, PaintField, Resolution, TokenCandidate } from './types';
 
 interface Anchor {
   instance: InstanceNode;
+  /** The anchor's own main component — instances mirror its structure 1:1
+   * by node name at every depth, so it doubles as a ground-truth lookup: the
+   * master is rarely hit by the same instance-level reset this plugin fixes. */
+  main: ComponentNode;
   component: string;
   state: string;
   variantTokens: string[];
@@ -78,7 +83,8 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
   if (!instance) return null;
 
   const main = await instance.getMainComponentAsync();
-  const componentSet = main?.parent?.type === 'COMPONENT_SET' ? main.parent : null;
+  if (!main) return null;
+  const componentSet = main.parent?.type === 'COMPONENT_SET' ? main.parent : null;
   const componentSetName = componentSet?.name ?? main?.name;
   if (!componentSetName) return null;
   const component = slugify(componentSetName.split('/')[0]);
@@ -124,7 +130,64 @@ async function describeAnchor(node: SceneNode): Promise<Anchor | null> {
   // the direct positive evidence from the anchor's actual state wins.
   const negativeTokens = rawNegativeTokens.filter((t) => !variantTokens.includes(t));
 
-  return { instance, component, state, variantTokens, negativeTokens };
+  return { instance, main, component, state, variantTokens, negativeTokens };
+}
+
+/** The path of node names from the anchor instance down to the broken node —
+ * instances mirror their main component's tree by name at every depth, so
+ * replaying this same path from the master finds the corresponding node. */
+function relativeNamePath(node: SceneNode, ancestor: InstanceNode): string[] {
+  const names: string[] = [];
+  let current: BaseNode | null = node;
+  while (current && current.id !== ancestor.id) {
+    names.unshift(current.name);
+    current = current.parent;
+  }
+  return names;
+}
+
+function findByNamePath(root: BaseNode, path: string[]): BaseNode | null {
+  let current: BaseNode | null = root;
+  for (const name of path) {
+    if (!current || !('children' in current) || !current.children) return null;
+    current = current.children.find((c) => c.name === name) ?? null;
+  }
+  return current;
+}
+
+/** Copies whatever the anchor's own master component has bound for this
+ * exact field — the master is the design system's source of truth, and the
+ * "current-color" reset this plugin targets hits instance-level overrides,
+ * not the master itself. Far more reliable than guessing from naming when
+ * it's available; returns null (not a guess) if the master's own binding is
+ * missing, unresolvable, or itself a placeholder. */
+async function findMasterMatch(
+  anchor: Anchor,
+  broken: BrokenPaint,
+): Promise<TokenCandidate | null> {
+  const path = relativeNamePath(broken.node, anchor.instance);
+  const masterNode = findByNamePath(anchor.main, path) as SceneNode | null;
+  if (!masterNode) return null;
+
+  const boundEntries = (
+    masterNode.boundVariables as Partial<Record<PaintField, VariableAlias[]>> | undefined
+  )?.[broken.field];
+  if (!boundEntries) return null;
+
+  for (const entry of boundEntries) {
+    if (!entry) continue;
+    if (await isPlaceholder(entry.id)) continue;
+    const variable = await figma.variables.getVariableByIdAsync(entry.id);
+    if (!variable) continue;
+    return {
+      variable,
+      source: variable.remote ? 'master component (library)' : 'master component',
+      isLibrary: variable.remote,
+      libraryKey: variable.remote ? variable.key : undefined,
+      score: Number.POSITIVE_INFINITY,
+    };
+  }
+  return null;
 }
 
 function hasExcludedSegment(name: string, negativeTokens: string[]): boolean {
@@ -174,7 +237,6 @@ async function collectLocalCandidates(anchor: Anchor, state: string): Promise<To
       if (!variable) continue;
       if (variable.resolvedType !== 'COLOR') continue;
       if (!matchesShape(variable.name, anchor.component, state)) continue;
-      if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         variable,
         source: collection.name,
@@ -206,7 +268,6 @@ async function collectLibraryCandidates(anchor: Anchor, state: string): Promise<
     for (const variable of variables) {
       if (variable.resolvedType !== 'COLOR') continue;
       if (!matchesShape(variable.name, anchor.component, state)) continue;
-      if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         // library candidates are imported lazily only if chosen; store a
         // placeholder Variable-shaped record via a cast at bind time.
@@ -244,8 +305,19 @@ async function searchCandidates(anchor: Anchor, state: string): Promise<TokenCan
 }
 
 /** Picks the single winning candidate, or null if the field is genuinely
- * ambiguous (none found, or nothing beats a zero score, or a real tie). */
-function pickBest(candidates: TokenCandidate[]): TokenCandidate | null {
+ * ambiguous (none found, or nothing beats a zero score, or a real tie).
+ *
+ * Tie-break order matters: negative-token exclusion runs LAST, only among
+ * candidates already tied on score, never as an upfront filter. A property's
+ * "other value" can be a pure naming artifact unrelated to that property at
+ * all (e.g. a component's content-color tokens all carry a fixed "default"
+ * segment that has nothing to do with its Type axis) — filtering candidates
+ * out by that word before scoring can discard the one real match entirely,
+ * leaving only a same-shaped but wrong token (often from a different
+ * library source) looking like the sole survivor. Positive scoring is the
+ * reliable signal; negative tokens only break a genuine tie between
+ * equally-scored candidates. */
+function pickBest(candidates: TokenCandidate[], negativeTokens: string[]): TokenCandidate | null {
   if (candidates.length === 0) return null;
 
   const maxScore = Math.max(...candidates.map((c) => c.score));
@@ -259,13 +331,27 @@ function pickBest(candidates: TokenCandidate[]): TokenCandidate | null {
 
   let topCandidates = candidates.filter((c) => c.score === maxScore);
 
-  // Prefer local over library among equally-scored candidates: editing this
-  // file makes its own local tokens authoritative, and a same-scoring
-  // library candidate is often a differently-shaped legacy/mirrored name
-  // rather than a genuinely distinct real option.
-  const localTop = topCandidates.filter((c) => !c.isLibrary);
-  if (localTop.length > 0) {
-    topCandidates = localTop;
+  // Tie-break 1: prefer local over library among equally-scored candidates —
+  // editing this file makes its own local tokens authoritative, and a
+  // same-scoring library candidate is often a differently-shaped legacy/
+  // mirrored name rather than a genuinely distinct real option.
+  if (topCandidates.length > 1) {
+    const localTop = topCandidates.filter((c) => !c.isLibrary);
+    if (localTop.length > 0) {
+      topCandidates = localTop;
+    }
+  }
+
+  // Tie-break 2: among what's still tied, drop any candidate scoped to a
+  // confirmed-opposite variant (e.g. Style=Accent excludes a Subtle-branch
+  // token) — but only if that leaves at least one candidate standing.
+  if (topCandidates.length > 1) {
+    const nonExcluded = topCandidates.filter(
+      (c) => !hasExcludedSegment(c.variable.name, negativeTokens),
+    );
+    if (nonExcluded.length > 0) {
+      topCandidates = nonExcluded;
+    }
   }
 
   return topCandidates.length === 1 ? topCandidates[0] : null;
@@ -275,8 +361,20 @@ export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | n
   const anchor = await describeAnchor(broken.node);
   if (!anchor) return null;
 
+  const masterMatch = await findMasterMatch(anchor, broken);
+  if (masterMatch) {
+    return {
+      kind: 'AUTO_BIND',
+      candidates: [masterMatch],
+      target: masterMatch,
+      component: anchor.component,
+      state: anchor.state,
+      viaMasterLookup: true,
+    };
+  }
+
   const candidates = await searchCandidates(anchor, anchor.state);
-  const best = pickBest(candidates);
+  const best = pickBest(candidates, anchor.negativeTokens);
 
   if (best) {
     return {
@@ -295,7 +393,7 @@ export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | n
   // low-risk fallback shape, tried only when the real state came up empty.
   if (anchor.state !== DEFAULT_STATE) {
     const fallbackCandidates = await searchCandidates(anchor, DEFAULT_STATE);
-    const fallbackBest = pickBest(fallbackCandidates);
+    const fallbackBest = pickBest(fallbackCandidates, anchor.negativeTokens);
     if (fallbackBest) {
       return {
         kind: 'AUTO_BIND',
