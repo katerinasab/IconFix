@@ -32,6 +32,9 @@ export interface Resolution {
   target?: TokenCandidate;
   component: string;
   state: string;
+  /** True when no token existed for the icon's actual state and this binds
+   * the "rest" token instead — a deliberate, low-risk fallback, not a bug. */
+  viaStateFallback?: boolean;
 }
 
 export interface AmbiguousReport {
@@ -49,6 +52,7 @@ export interface FixedReport {
   nodePath: string;
   field: PaintField;
   boundTo: string;
+  viaStateFallback?: boolean;
 }
 
 export interface RunResult {

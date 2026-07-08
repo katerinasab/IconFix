@@ -55,6 +55,7 @@ async function run(): Promise<void> {
       nodePath: nodePath(item.node),
       field: item.field,
       boundTo: resolution.target.variable.name,
+      viaStateFallback: resolution.viaStateFallback,
     };
     if (applied) {
       result.fixed.push(report);

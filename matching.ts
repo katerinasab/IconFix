@@ -144,7 +144,7 @@ function scoreCandidate(name: string, variantTokens: string[]): number {
   return score;
 }
 
-async function collectLocalCandidates(anchor: Anchor): Promise<TokenCandidate[]> {
+async function collectLocalCandidates(anchor: Anchor, state: string): Promise<TokenCandidate[]> {
   const out: TokenCandidate[] = [];
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
   for (const collection of collections) {
@@ -154,7 +154,7 @@ async function collectLocalCandidates(anchor: Anchor): Promise<TokenCandidate[]>
     for (const variable of variables) {
       if (!variable) continue;
       if (variable.resolvedType !== 'COLOR') continue;
-      if (!matchesShape(variable.name, anchor.component, anchor.state)) continue;
+      if (!matchesShape(variable.name, anchor.component, state)) continue;
       if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         variable,
@@ -167,7 +167,7 @@ async function collectLocalCandidates(anchor: Anchor): Promise<TokenCandidate[]>
   return out;
 }
 
-async function collectLibraryCandidates(anchor: Anchor): Promise<TokenCandidate[]> {
+async function collectLibraryCandidates(anchor: Anchor, state: string): Promise<TokenCandidate[]> {
   const out: TokenCandidate[] = [];
   let libraryCollections: LibraryVariableCollection[] = [];
   try {
@@ -186,7 +186,7 @@ async function collectLibraryCandidates(anchor: Anchor): Promise<TokenCandidate[
     }
     for (const variable of variables) {
       if (variable.resolvedType !== 'COLOR') continue;
-      if (!matchesShape(variable.name, anchor.component, anchor.state)) continue;
+      if (!matchesShape(variable.name, anchor.component, state)) continue;
       if (hasExcludedSegment(variable.name, anchor.negativeTokens)) continue;
       out.push({
         // library candidates are imported lazily only if chosen; store a
@@ -217,18 +217,17 @@ function dedupeByName(candidates: TokenCandidate[]): TokenCandidate[] {
   return Array.from(byName.values());
 }
 
-export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | null> {
-  const anchor = await describeAnchor(broken.node);
-  if (!anchor) return null;
-
-  const candidates = dedupeByName([
-    ...(await collectLocalCandidates(anchor)),
-    ...(await collectLibraryCandidates(anchor)),
+async function searchCandidates(anchor: Anchor, state: string): Promise<TokenCandidate[]> {
+  return dedupeByName([
+    ...(await collectLocalCandidates(anchor, state)),
+    ...(await collectLibraryCandidates(anchor, state)),
   ]);
+}
 
-  if (candidates.length === 0) {
-    return { kind: 'AMBIGUOUS_NONE', candidates, component: anchor.component, state: anchor.state };
-  }
+/** Picks the single winning candidate, or null if the field is genuinely
+ * ambiguous (none found, or nothing beats a zero score, or a real tie). */
+function pickBest(candidates: TokenCandidate[]): TokenCandidate | null {
+  if (candidates.length === 0) return null;
 
   const maxScore = Math.max(...candidates.map((c) => c.score));
 
@@ -237,9 +236,7 @@ export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | n
   // shape. Being the sole such match is not evidence of correctness (e.g. a
   // stale/orphaned token elsewhere can silently vanish from the real search,
   // leaving one unrelated same-shaped token looking "unique"); don't guess.
-  if (maxScore === 0) {
-    return { kind: 'AMBIGUOUS_MULTI', candidates, component: anchor.component, state: anchor.state };
-  }
+  if (maxScore === 0) return null;
 
   let topCandidates = candidates.filter((c) => c.score === maxScore);
 
@@ -252,19 +249,49 @@ export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | n
     topCandidates = localTop;
   }
 
-  if (topCandidates.length === 1) {
+  return topCandidates.length === 1 ? topCandidates[0] : null;
+}
+
+export async function resolveTarget(broken: BrokenPaint): Promise<Resolution | null> {
+  const anchor = await describeAnchor(broken.node);
+  if (!anchor) return null;
+
+  const candidates = await searchCandidates(anchor, anchor.state);
+  const best = pickBest(candidates);
+
+  if (best) {
     return {
       kind: 'AUTO_BIND',
       candidates,
-      target: topCandidates[0],
+      target: best,
       component: anchor.component,
       state: anchor.state,
     };
   }
 
+  // Nothing usable for the icon's actual state. Many design systems only
+  // vary content (icon/text) color for a few meaningful states (typically
+  // disabled, sometimes checked) while transient interaction states like
+  // hover/active only change background/border — so "rest" is a reasonable,
+  // low-risk fallback shape, tried only when the real state came up empty.
+  if (anchor.state !== DEFAULT_STATE) {
+    const fallbackCandidates = await searchCandidates(anchor, DEFAULT_STATE);
+    const fallbackBest = pickBest(fallbackCandidates);
+    if (fallbackBest) {
+      return {
+        kind: 'AUTO_BIND',
+        candidates: fallbackCandidates,
+        target: fallbackBest,
+        component: anchor.component,
+        state: DEFAULT_STATE,
+        viaStateFallback: true,
+      };
+    }
+  }
+
   return {
-    kind: 'AMBIGUOUS_MULTI',
-    candidates: topCandidates,
+    kind: candidates.length === 0 ? 'AMBIGUOUS_NONE' : 'AMBIGUOUS_MULTI',
+    candidates,
     component: anchor.component,
     state: anchor.state,
   };
