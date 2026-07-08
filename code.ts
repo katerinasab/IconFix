@@ -28,8 +28,8 @@ async function run(): Promise<void> {
   }
 
   const broken = await findBrokenPaints(selection);
-  const result: RunResult = { fixed: [], ambiguous: [], skippedOkCount: 0 };
-  const ambiguousNodes: SceneNode[] = [];
+  const result: RunResult = { fixed: [], ambiguous: [], applyFailed: [], skippedOkCount: 0 };
+  const flaggedNodes: SceneNode[] = [];
 
   for (const item of broken) {
     const resolution = await resolveTarget(item);
@@ -45,31 +45,42 @@ async function run(): Promise<void> {
         candidateNames: resolution?.candidates.map((c) => `${c.variable.name} (${c.source})`) ?? [],
       };
       result.ambiguous.push(report);
-      ambiguousNodes.push(item.node);
+      flaggedNodes.push(item.node);
       continue;
     }
 
-    await applyFix(item, resolution.target);
-    const fixed: FixedReport = {
+    const applied = await applyFix(item, resolution.target);
+    const report: FixedReport = {
       nodeId: item.node.id,
       nodePath: nodePath(item.node),
       field: item.field,
       boundTo: resolution.target.variable.name,
     };
-    result.fixed.push(fixed);
+    if (applied) {
+      result.fixed.push(report);
+    } else {
+      // Figma silently rejected the write — happened in practice on some
+      // deeply-nested icon glyphs whose own Set/Size properties are
+      // variable-bound. We found the right token; it just can't be applied
+      // by script. Surface it distinctly so it isn't mistaken for "fixed".
+      result.applyFailed.push(report);
+      flaggedNodes.push(item.node);
+    }
   }
 
   console.log('[Icon Token Repair] fixed:', result.fixed);
+  console.log('[Icon Token Repair] apply failed (fix manually via Fill panel):', result.applyFailed);
   console.log('[Icon Token Repair] needs review:', result.ambiguous);
 
-  if (ambiguousNodes.length > 0) {
-    figma.currentPage.selection = ambiguousNodes;
-    figma.viewport.scrollAndZoomIntoView(ambiguousNodes);
+  if (flaggedNodes.length > 0) {
+    figma.currentPage.selection = flaggedNodes;
+    figma.viewport.scrollAndZoomIntoView(flaggedNodes);
   }
 
   const summary =
-    `Icon Token Repair: fixed ${result.fixed.length}, needs review ${result.ambiguous.length}` +
-    (ambiguousNodes.length > 0 ? ' — selected on canvas, see console for candidates' : '');
+    `Icon Token Repair: fixed ${result.fixed.length}, needs review ${result.ambiguous.length}, ` +
+    `apply failed ${result.applyFailed.length}` +
+    (flaggedNodes.length > 0 ? ' — selected on canvas, see console' : '');
   figma.notify(summary, { timeout: 6000 });
 
   figma.closePlugin();

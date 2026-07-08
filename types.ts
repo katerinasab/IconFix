@@ -54,5 +54,10 @@ export interface FixedReport {
 export interface RunResult {
   fixed: FixedReport[];
   ambiguous: AmbiguousReport[];
+  /** Correct token found, but Figma silently rejected the write on
+   * read-back — happens on some deeply-nested instance children whose
+   * component properties are themselves variable-bound. Needs a manual fix
+   * via the Fill panel; scripting cannot apply it. */
+  applyFailed: FixedReport[];
   skippedOkCount: number;
 }

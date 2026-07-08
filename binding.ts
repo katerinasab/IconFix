@@ -10,7 +10,16 @@ export async function resolveVariable(candidate: TokenCandidate): Promise<Variab
   return candidate.variable;
 }
 
-export async function applyFix(broken: BrokenPaint, candidate: TokenCandidate): Promise<void> {
+/**
+ * Applies a chosen token candidate to a broken paint. Returns whether the
+ * write actually stuck — Figma can silently reject a fills/strokes
+ * reassignment on certain deeply-nested instance children (seen in practice
+ * on icon glyphs whose Set/Size component properties are themselves
+ * variable-bound), with no thrown error and no visible symptom other than
+ * the value being unchanged on read-back. Callers must not treat this as
+ * "fixed" unless the returned value is true.
+ */
+export async function applyFix(broken: BrokenPaint, candidate: TokenCandidate): Promise<boolean> {
   const variable = await resolveVariable(candidate);
   const { node, field, placeholderIndices } = broken;
 
@@ -27,4 +36,8 @@ export async function applyFix(broken: BrokenPaint, candidate: TokenCandidate): 
   );
 
   node[field] = paints;
+
+  const verifyPaints = node[field] as Paint[];
+  const boundId = (verifyPaints[lastIndex] as SolidPaint)?.boundVariables?.color?.id;
+  return boundId === variable.id;
 }
