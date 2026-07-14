@@ -8,6 +8,15 @@ export const PLACEHOLDER_VARIABLE_NAMES = ['current-color'];
 /** Remote collection names known to host placeholder/default variables. */
 export const PLACEHOLDER_COLLECTION_NAMES = ['defaultColors'];
 
+/** Also treat a fully unbound solid fill/stroke matching one of these exact
+ * colors as broken — another symptom of the same Figma reset, seen when the
+ * binding is dropped entirely (no variable at all) rather than falling back
+ * to the current-color placeholder variable. Kept as an exact-color
+ * allowlist (not a fuzzy/near-black match): a raw-color signal is inherently
+ * riskier than a placeholder-variable one, since a legitimately authored
+ * flat-black icon would otherwise be mistaken for a broken one. */
+export const HARDCODED_PLACEHOLDER_COLORS = [{ r: 0, g: 0, b: 0 }];
+
 /** Instance names to skip when walking up from a broken icon to find the
  * "real" consuming component (thin slot wrappers, not components themselves). */
 export const WRAPPER_NAMES = ['icon-wrapper'];

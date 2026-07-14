@@ -2,6 +2,7 @@
 // classifies every fills/strokes paint as OK, a total loss of binding, or a
 // stray placeholder paint sitting alongside a still-good one.
 
+import { HARDCODED_PLACEHOLDER_COLORS } from './config';
 import { isPlaceholder } from './placeholder';
 import type { BrokenPaint, PaintField } from './types';
 
@@ -15,26 +16,44 @@ function hasPaintField(node: SceneNode, field: PaintField): node is SceneNode & 
   return Array.isArray(value);
 }
 
+/** A fully unbound solid paint matching one of the known hardcoded reset
+ * colors (see config.ts) — the other symptom of the same Figma bug, where
+ * the binding is dropped entirely instead of falling back to a placeholder
+ * variable. */
+function isHardcodedPlaceholderPaint(paint: Paint): boolean {
+  if (paint.type !== 'SOLID') return false;
+  return HARDCODED_PLACEHOLDER_COLORS.some(
+    (c) => paint.color.r === c.r && paint.color.g === c.g && paint.color.b === c.b,
+  );
+}
+
 async function classifyField(node: SceneNode, field: PaintField): Promise<BrokenPaint | null> {
   if (!hasPaintField(node, field)) return null;
+
+  const paints = node[field];
+  if (paints.length === 0) return null;
 
   const boundVariables = node.boundVariables as
     | Partial<Record<PaintField, VariableAlias[]>>
     | undefined;
   const boundEntries = boundVariables?.[field];
-  if (!boundEntries || boundEntries.length === 0) return null;
 
   const placeholderIndices: number[] = [];
   const goodIndices: number[] = [];
 
-  for (let i = 0; i < boundEntries.length; i++) {
-    const entry = boundEntries[i];
-    if (!entry) continue;
-    if (await isPlaceholder(entry.id)) {
+  for (let i = 0; i < paints.length; i++) {
+    const entry = boundEntries?.[i];
+    if (entry) {
+      if (await isPlaceholder(entry.id)) {
+        placeholderIndices.push(i);
+      } else {
+        const variable = await figma.variables.getVariableByIdAsync(entry.id);
+        if (variable) goodIndices.push(i);
+      }
+      continue;
+    }
+    if (isHardcodedPlaceholderPaint(paints[i])) {
       placeholderIndices.push(i);
-    } else {
-      const variable = await figma.variables.getVariableByIdAsync(entry.id);
-      if (variable) goodIndices.push(i);
     }
   }
 
