@@ -146,11 +146,26 @@ function relativeNamePath(node: SceneNode, ancestor: InstanceNode): string[] {
   return names;
 }
 
+/** Replays a name path from the master downward. A name can legitimately
+ * differ from the instance at an instance-swapped slot — e.g. an
+ * `icon-wrapper`'s nested glyph is "dots_horizontal" on the master but
+ * "chevron_left" on this particular instance, since each consumer swaps in
+ * its own icon. When the name doesn't match, but the current node has
+ * exactly one child, that child is an unambiguous single slot — descend into
+ * it anyway rather than failing the whole lookup over a swapped name. */
 function findByNamePath(root: BaseNode, path: string[]): BaseNode | null {
   let current: BaseNode | null = root;
   for (const name of path) {
     if (!current || !('children' in current) || !current.children) return null;
-    current = current.children.find((c) => c.name === name) ?? null;
+    const children = current.children as readonly SceneNode[];
+    const byName: SceneNode | undefined = children.find((c) => c.name === name);
+    if (byName) {
+      current = byName;
+    } else if (children.length === 1) {
+      current = children[0];
+    } else {
+      return null;
+    }
   }
   return current;
 }
